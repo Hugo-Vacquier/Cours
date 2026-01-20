@@ -1,0 +1,157 @@
+Cours 
+
+						VAGRANT
+Crée un fichier Vagrantfile RUBY:
+touch Vagrantfile
+
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "debian/bookworm64" # Une debian récente
+  config.vm.define "docker-vm"
+  
+  # Provisionning Shell pour installer Docker 
+  config.vm.provision "shell", inline: <<-SHELL
+    apt-get update
+    apt-get install -y curl
+    curl -fsSL https://get.docker.com -o get-docker.sh
+    sh get-docker.sh
+    usermod -aG docker vagrant
+  SHELL
+end
+
+Commande : vagrant up
+
+						ANSIBLE
+Créer un fichier host "inventori.ini" :
+[futureservers]
+fedora_ip ansible_user=pwd ansible_ssh_pass=tttttt
+arch_ip   ansible_user=pwd ansible_ssh_pass=tttttt
+
+[logservers]
+debian_ip ansible_user=pwd ansible_ssh_pass=tttttt
+
+# Groupe parent qui contient les 4 VMs (Les 3 du dessus + le contrôleur s'il s'inclut lui-même, 
+# mais l'énoncé dit "toutes les quatres VMs", supposons qu'il y a une 4ème ou le localhost)
+[servers:children]
+futureservers
+logservers
+
+
+Créer un utilisateur TOTOsécurisé : 
+fichier bootstrap.yml : 
+---
+- name: Bootstrapping des serveurs
+  hosts: servers
+  become: yes
+  tasks:
+    - name: Création de l'utilisateur toto
+      user:
+        name: toto
+        state: present
+        shell: /bin/bash
+        ssh_key_file: .ssh/id_rsa
+
+    - name: Déployer la clé publique
+      authorized_key:
+        user: toto
+        state: present
+        key: "{{ lookup('file', '~/.ssh/id_rsa.pub') }}"
+
+
+Mettre à jour et installer des paquets spécifiques selon l'OS Playbook :
+update.yml : 
+---
+- name: Mise à jour et installation
+  hosts: servers
+  become: yes
+  tasks:
+    # Mise à jour générique (gestion des différences apt/dnf/pacman)
+    - name: Update Debian/Ubuntu
+      apt:
+        update_cache: yes
+        upgrade: dist
+      when: ansible_os_family == "Debian"
+
+    - name: Update Fedora
+      dnf:
+        name: "*"
+        state: latest
+      when: ansible_distribution == "Fedora"
+
+    - name: Update Arch
+      pacman:
+        update_cache: yes
+        upgrade: yes
+      when: ansible_os_family == "Archlinux"
+
+    # Installations spécifiques
+    - name: Paquets pour Fedora
+      dnf:
+        name: [docker, docker-compose, podman]
+        state: present
+      when: inventory_hostname in groups['futureservers'] and ansible_distribution == "Fedora"
+
+    - name: Paquets pour Arch
+      pacman:
+        name: [nginx, net-tools]
+        state: present
+      when: inventory_hostname in groups['futureservers'] and ansible_os_family == "Archlinux"
+
+    - name: Paquets pour Debian
+      apt:
+        name: net-tools
+        state: present
+      when: inventory_hostname in groups['logservers']
+
+
+						CONTENEURS
+
+Crée un dossier et y mettre un fichier index.html + crée un fichier Dockerfile :
+# Image de base (debian ou alpine)
+FROM debian:bullseye-slim
+
+# Installation des outils requis
+RUN apt-get update && apt-get install -y \
+    curl \
+    default-mysql-client \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Création user non-root
+RUN useradd -m webuser
+
+# Copie du site
+COPY index.html /home/webuser/index.html
+
+# On passe en utilisateur non-root
+USER webuser
+WORKDIR /home/webuser
+
+# Commande de lancement (Serveur web simple en python sur port 8080 car <1024 interdit aux non-root)
+CMD ["python3", "-m", "http.server", "8080"]
+
+
+Commande à exécuter pour construire 
+# Build de l'image
+docker build -t mon-web-server .
+
+# Création du volume pour la DB
+docker volume create db_data
+
+# Lancement MySQL (pour que le web puisse s'y connecter)
+docker run -d --name mysql-container \
+  -e MYSQL_ROOT_PASSWORD=root \
+  -e MYSQL_DATABASE=mabase \
+  -v db_data:/var/lib/mysql \
+  mysql:5.7
+
+# Lancement du Web Server (Link manuel ou réseau bridge)
+# On mappe le port 5555 de l'hôte vers le 8080 du conteneur
+docker run -d --name web-container \
+  -p 5555:8080 \
+  --link mysql-container:dbhost \
+  mon-web-server
+
+
+Requête SQL test :
+docker exec -it web-container sh -c "mysql -h dbhost -u root -proot -e 'SHOW DATABASES;'"
